@@ -1,4 +1,5 @@
 import os
+import glob
 import time
 import datetime
 import threading
@@ -21,6 +22,7 @@ que = Queue()
 buf = None
 buf_lst = None
 
+
 class Camera(object):
     img = None
     thread = None
@@ -29,10 +31,13 @@ class Camera(object):
     bucket = None
     db = None
     p = None
+    visitor_names = {0: 'unknown'}
+    cctv_warning = 0
 
     flag_connection = False
     flag_train_model = False
     flag_update_model = False
+    file_train_model = ""
 
     flag_db_polling = False
     flag_play_audio = False
@@ -40,19 +45,17 @@ class Camera(object):
     flag_pre_playing_audio = False
     info_audio_file = ""
 
-
     path_dataset = 'dataset'  # visitor training
 
     def init_firebase(self):
         # firebase
 
-        # PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
-        # cred = credentials.Certificate("./firebase_certificate/rpi-test-cfcd4-firebase-adminsdk-pvuun-4bd8b1d100.json")
-        PROJECT_ID = "mose-cctv"  # 자신의 project id
-        cred = credentials.Certificate("./firebase_certificate/mose-cctv-firebase-adminsdk-90ev1-1933d48ad7.json")
-        default_app = firebase_admin.initialize_app(cred, {
-            'storageBucket': f"{PROJECT_ID}.appspot.com"
-        })
+        PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
+        cred = credentials.Certificate("./firebase_certificate/"
+                                       "rpi-test-cfcd4-firebase-adminsdk-pvuun-4bd8b1d100.json")
+        # PROJECT_ID = "mose-cctv"  # 자신의 project id
+        # cred = credentials.Certificate("./firebase_certificate/mose-cctv-firebase-adminsdk-90ev1-1933d48ad7.json")
+        firebase_admin.initialize_app(cred, {'storageBucket': f"{PROJECT_ID}.appspot.com"})
         # 버킷은 바이너리 객체의 상위 컨테이너이다. 버킷은 Storage에서 데이터를 보관하는 기본 컨테이너이다.
         self.bucket = storage.bucket()  # 기본 버킷 사용
         # self.db = firestore.client()  # 사용전 함수안에서 호출해야 유효..왜 그런지 모름..
@@ -65,7 +68,8 @@ class Camera(object):
         self.audioTimer()
         self.queTimer()
 
-        self.fb_updateRefURL(socket.gethostbyname(socket.gethostname()) + ':5000')
+        # self.fb_updateRefURL(socket.gethostbyname(socket.gethostname()) + ':5000')
+        self.fb_updateRefURL('221.140.25.241:9192')
 
         if Camera.thread is None:
             Camera.thread = threading.Thread(target=self._thread)
@@ -73,6 +77,25 @@ class Camera(object):
 
             while self.frame is None:
                 time.sleep(0)
+
+    def set_restart(self):
+        self.initialize()
+
+    def get_frame(self):
+        Camera.last_access = time.time()
+        # self.initialize()
+        return self.frame
+
+    @classmethod
+    def get_visitor_names(cls):
+        imagePaths = [os.path.join('dataset', f) for f in os.listdir('dataset')]
+
+        for imagePath in imagePaths:
+            visitor_id = int(os.path.split(imagePath)[-1].split(".")[0])
+            name = os.path.split(imagePath)[-1].split(".")[1]
+            cls.visitor_names[visitor_id] = name
+
+        print(f"number of visitors : {len(cls.visitor_names)}")
 
     @classmethod
     def intervalTimer(cls):
@@ -122,7 +145,8 @@ class Camera(object):
         else:
             if cls.p is not None:
                 # print("Stop audio")
-                cls.que_log(7, f"Stop play audio.!")
+                if cls.flag_playing_audio is True:
+                    cls.que_log(7, f"Stop play audio.!")
                 cls.p.terminate()
                 cls.flag_playing_audio = False
 
@@ -132,14 +156,6 @@ class Camera(object):
 
         timer = threading.Timer(6, cls.audioTimer)
         timer.start()
-
-    def set_restart(self):
-        self.initialize()
-
-    def get_frame(self):
-        Camera.last_access = time.time()
-        # self.initialize()
-        return self.frame
 
     @classmethod
     def fb_checkControlAudio(cls):
@@ -170,9 +186,15 @@ class Camera(object):
             state_train_model = doc.to_dict()['state']
             if state_train_model == 1:  # train start
                 cls.flag_train_model = True
-                cls.fb_setTrainControl(2)
+                cls.file_train_model = doc.to_dict()['file_name']
+                cls.fb_updateTrainControl(2)
+            elif state_train_model == 10:  # delete
+                cls.del_dataset_by_vid(doc.to_dict()['del_vid'])
+                cls.file_train_model = "del"  #
+                cls.flag_train_model = True
+                cls.fb_updateTrainControl(2)
             elif state_train_model == 3:  # Update Complete
-                cls.fb_setTrainControl(0)
+                cls.fb_updateTrainControl(0)
         else:
             print('[fb_checkAudioCmd] No Document..!!')
 
@@ -184,11 +206,11 @@ class Camera(object):
         print(f'fb_set_connection: Connect --> {cls.flag_connection}')
 
     @classmethod
-    def fb_setTrainControl(cls, state):
+    def fb_updateTrainControl(cls, state):
         db = firestore.client()
         doc_ref = db.collection(u'cctv').document(u'Control_Train')
-        doc_ref.set({u'state': state})
-        print(f'fb_setTrainControl: state --> {state}')
+        doc_ref.update({u'state': state})
+        print(f'fb_updateTrainControl: state --> {state}')
 
     @classmethod
     def fb_updateRefURL(cls, str_url):
@@ -199,17 +221,19 @@ class Camera(object):
 
     @classmethod
     def fb_setHistory(cls, t, eid, comment, vid=0, file_name=""):
-        basename = "I"  # Info
+
         if eid == 1:  # Motion Start
-            basename = "E"  # Event
+            basename = "E"
             fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment}
         elif eid == 2:  # Motion End
-            basename = "E"  # Event
-            fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment, u'file_name': file_name}
+            basename = "E"
+            fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment,
+                      u'file_name': file_name}
         elif eid == 3:  # Face Recognition
-            basename = "E"  # Event
-            fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment, u'visitorID': vid, u'file_name': file_name}
-        else:
+            basename = "E"
+            fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment,
+                      u'visitorID': vid, u'file_name': file_name}
+        else:  # Default
             basename = "I"  # Info
             fields = {u'ei': basename, 'dt': t, u'id': eid, u'comment': comment}
 
@@ -235,8 +259,8 @@ class Camera(object):
             print(f'fileDownload_audio!! - {file}')
             print(blob.public_url)
             return True
-        except:
-            print('download fail..!!')
+        except Exception as e:
+            print('download fail..!!: %r', e)
             os.remove('./audio/' + file)
             return False
 
@@ -253,8 +277,8 @@ class Camera(object):
             blob.download_to_filename(filename='./audio/')
             print(blob.public_url)
             return True
-        except:
-            print('download fail..!!')
+        except Exception as e:
+            print('download fail..!!: %r', e)
             return False
 
     @classmethod
@@ -332,8 +356,9 @@ class Camera(object):
         return frame1, is_detect
 
     @classmethod
-    def create_capture_image(cls, cap, vid, visitor):
+    def create_capture_image(cls, cap, vid):
         print('execute_capture!!')
+        visitor = cls.visitor_names[vid]
         cls.que_log(3, f'Face Recognition {visitor} detect..!!', vid, visitor)
         # 사진찍기
         # 중복없는 파일명 만들기
@@ -347,7 +372,7 @@ class Camera(object):
         cls.fileUpload_image(filename)
 
     @classmethod
-    def task_face_recognition(cls, img, face_cascade, min_w, min_h, recognizer, names):
+    def task_face_recognition(cls, img, face_cascade, min_w, min_h, recognizer):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         faces = face_cascade.detectMultiScale(
@@ -363,13 +388,13 @@ class Camera(object):
 
             visitor_id, confidence = recognizer.predict(gray[y:y + h, x:x + w])
 
-            if(visitor_id < 0) | (visitor_id >= len(names)):
+            if not cls.visitor_names.get(visitor_id):
                 print(f"invalid visitor id: {visitor_id}")
                 continue
 
             # Check if confidence is less them 100 ==> "0" is perfect match
             if confidence < 100:
-                visitor_name = names[visitor_id]
+                visitor_name = cls.visitor_names[visitor_id]
                 confidence = "  {0}%".format(round(100 - confidence))
             else:
                 visitor_name = "unknown"
@@ -395,6 +420,7 @@ class Camera(object):
 
             visitor_id = int(os.path.split(imagePath)[-1].split(".")[0])
             name = os.path.split(imagePath)[-1].split(".")[1]
+            cls.visitor_names[visitor_id] = name
             faces = detector.detectMultiScale(img_numpy)
 
             for (x, y, w, h) in faces:
@@ -412,9 +438,75 @@ class Camera(object):
         recognizer = cv2.face.LBPHFaceRecognizer_create()
 
         faces, ids, names = cls.getImagesAndLabels(cls.path_dataset, face_cascade)
-        recognizer.train(faces, np.array(ids))
 
-        recognizer.write('trainer/trainer.yml')
+        if len(ids) > 0:
+            recognizer.train(faces, np.array(ids))
+            recognizer.write('trainer/trainer.yml')
+            cls.cctv_warning = 0
+        else:
+            cls.cctv_warning = 3
+            cls.fb_updateTrainControl(3)
+            print('exec_training no ids..!!')
+
+    @classmethod
+    def exec_dataset_from_video(cls, file_name):
+        if os.path.exists(r'user_dataset/' + file_name) is False:
+            print("Training File not exist..!!")
+            return
+
+        cam = cv2.VideoCapture(r'user_dataset/' + file_name)
+        face_detector = cv2.CascadeClassifier('./weight/haarcascade_frontalface_default.xml')
+
+        # For each person, enter one numeric face id
+        face_id = int(file_name.split('.')[0])
+        visitor_name = file_name.split('.')[1]
+
+        print(f"\n Visitor id:{face_id} , name:{visitor_name}")
+
+        count = 0
+
+        while True:
+            ret, img = cam.read()
+            if img is None:
+                break
+
+            if count <= 30:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                faces = face_detector.detectMultiScale(gray, 1.3, 5)
+
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                    count += 1
+                    print(count)
+
+                    # Save the captured image into the datasets folder
+                    cv2.imwrite("dataset/" + str(face_id) + "." + visitor_name + '.' + str(count) + ".jpg",
+                                gray[y:y + h, x: x + w])
+
+                # cv2.imshow('image', img)
+
+                cv2.waitKey(1) & 0xff  # Press 'ESC' for exiting video
+
+        print("\n Exec_dataset_from_video complete..!!")
+        cam.release()
+
+    @classmethod
+    def del_dataset_by_vid(cls, vid):
+        # dataset
+        fp = glob.glob("dataset/" + str(vid) + "*.jpg")
+        print(f'[del_dataset_by_vid] del {vid} len {len(fp)}')
+
+        for f in fp:
+            os.remove(f)
+            print(f'remove: {f}')
+
+        # user_dataset
+        fp = glob.glob("user_dataset/" + str(vid) + "*.*")
+        print(f'[del_dataset_by_vid] del {vid} len {len(fp)}')
+
+        for f in fp:
+            os.remove(f)
+            print(f'remove: {f}')
 
     @classmethod
     def que_log(cls, eid, comment, vid=0, file_name=""):
@@ -440,19 +532,30 @@ class Camera(object):
         filename_video = 'default.avi'
         out = None
 
+        # check number of visitor & names
+        cls.get_visitor_names()
+        if len(cls.visitor_names) == 1:
+            print('There is no dataset..!!')
+            cls.cctv_warning = 1
+
         # for face recognition
         recognizer = cv2.face.LBPHFaceRecognizer_create()
-        recognizer.read('trainer/trainer.yml')
+        if os.path.exists('trainer/trainer.yml'):
+            recognizer.read('trainer/trainer.yml')
+        else:
+            print('No trainer.yml file..!!')
+            cls.cctv_warning = 2
+
         cascade_path = "weight/haarcascade_frontalface_default.xml"
         face_cascade = cv2.CascadeClassifier(cascade_path)
-        names = ['unknown', 'Unknown', 'TaeinKim', 'Park', 'HanHyojoo',
-                 'Youjaesuk', 'Junjihyun', 'TaeinKim']  # names related to ids: example ==> Marcelo: id=1,  etc
+
         min_w = 0.1 * camera.get(3)  # Define min window size to be recognized as a face
         min_h = 0.1 * camera.get(4)
         visitors_pre = {}
+        delay_cap = 0
 
         print('task_camera: camera read start..!!')
-        #cls.que_log(1, 'task_camera: camera read start..!!')
+        # cls.que_log(1, 'task_camera: camera read start..!!')
         while True:
             # read current frame
             ret, img = camera.read()
@@ -484,7 +587,7 @@ class Camera(object):
                         flag_motion_detect = False
                         flag_recode_video = False
                         print(f'{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")} event: motion detect End..!!')
-                        cls.que_log(2, 'motion detect End..!!', filename_video)
+                        cls.que_log(2, 'motion detect End..!!', file_name=filename_video)
                         tm_motion_detect = time.time()
                         out.release()  # file save complete
                         cls.fileUpload_video(filename_video)
@@ -499,42 +602,52 @@ class Camera(object):
             frame2 = img
 
             # face recognition  -------------------------------------------------------------------------------
-            if cls.flag_update_model is True:  # new training and weight updated
-                print('Update Model..!!')
-                cls.que_log(101, 'Update Model..!!')
-                recognizer = cv2.face.LBPHFaceRecognizer_create()
-                recognizer.read('trainer/trainer.yml')
-                cls.flag_update_model = False
-                cls.fb_setTrainControl(3)
+            if cls.cctv_warning == 0:  # No Model
+                if cls.flag_update_model is True:  # new training and weight updated
+                    print('Update Model..!!')
+                    cls.que_log(101, 'Update Model..!!')
+                    recognizer = cv2.face.LBPHFaceRecognizer_create()
+                    recognizer.read('trainer/trainer.yml')
+                    cls.flag_update_model = False
+                    cls.fb_updateTrainControl(3)
 
-            img, visitors = cls.task_face_recognition(img,
-                                                      face_cascade,
-                                                      min_w, min_h,
-                                                      recognizer,
-                                                      names)
-            enble_capture = False
-            new_visitor = ""
-            if len(visitors) > 0:
-                for k, v in visitors.items():
-                    if k in visitors_pre:
-                        # print('skip')
-                        continue
-                    else:
-                        enble_capture = True
-                        new_visitor = v
-                        visitors_pre[k] = v
-            if enble_capture:
-                cls.create_capture_image(img, names.index(new_visitor), new_visitor)
+                img, visitors = cls.task_face_recognition(img,
+                                                          face_cascade,
+                                                          min_w, min_h,
+                                                          recognizer)
+                enble_capture = False
+                new_visitor = 0
+                if len(visitors) > 0:
+                    delay_cap += 1
+                    if delay_cap > 10:
+                        delay_cap = 0
+                        for k, v in visitors.items():
+                            if k in visitors_pre:
+                                # print('skip')
+                                continue
+                            else:
+                                enble_capture = True
+                                new_visitor = k
+                                visitors_pre[k] = v
+
+                if enble_capture:
+                    cls.create_capture_image(img, new_visitor)
 
             # Training Model  -------------------------------------------------------------------------------
             if cls.flag_train_model:
+                print(cls.file_train_model)
+                if cls.file_train_model == "del":
+                    print('Start training for delete..!!')
+                else:
+                    cls.exec_dataset_from_video(cls.file_train_model)
+
                 cls.exec_training(face_cascade)
                 cls.flag_train_model = False
                 cls.flag_update_model = True
 
             cv2.imshow("Video", img)
 
-            ret_key = cv2.waitKey(int(1000 / 12.))
+            cv2.waitKey(int(1000 / 12.))
 
             if cls.flag_db_polling is False:
                 cls.flag_db_polling = True
