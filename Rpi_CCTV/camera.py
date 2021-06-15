@@ -15,7 +15,8 @@ import numpy as np
 from PIL import Image
 from playsound import playsound
 from queue import Queue
-import socket
+
+# import socket
 
 que = Queue()
 
@@ -37,7 +38,7 @@ class Camera(object):
     flag_connection = False
     flag_train_model = False
     flag_update_model = False
-    file_train_model = ""
+    info_train_file = ""
 
     flag_db_polling = False
     flag_play_audio = False
@@ -50,11 +51,11 @@ class Camera(object):
     def init_firebase(self):
         # firebase
 
-        PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
-        cred = credentials.Certificate("./firebase_certificate/"
-                                       "rpi-test-cfcd4-firebase-adminsdk-pvuun-4bd8b1d100.json")
-        # PROJECT_ID = "mose-cctv"  # 자신의 project id
-        # cred = credentials.Certificate("./firebase_certificate/mose-cctv-firebase-adminsdk-90ev1-1933d48ad7.json")
+        #PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
+        #cred = credentials.Certificate("./firebase_certificate/"
+        #                               "rpi-test-cfcd4-firebase-adminsdk-pvuun-4bd8b1d100.json")
+        PROJECT_ID = "mose-cctv"  # 자신의 project id
+        cred = credentials.Certificate("./firebase_certificate/mose-cctv-firebase-adminsdk-90ev1-1933d48ad7.json")
         firebase_admin.initialize_app(cred, {'storageBucket': f"{PROJECT_ID}.appspot.com"})
         # 버킷은 바이너리 객체의 상위 컨테이너이다. 버킷은 Storage에서 데이터를 보관하는 기본 컨테이너이다.
         self.bucket = storage.bucket()  # 기본 버킷 사용
@@ -185,14 +186,21 @@ class Camera(object):
             # print(f'Document data: {doc.to_dict()}')
             state_train_model = doc.to_dict()['state']
             if state_train_model == 1:  # train start
-                cls.flag_train_model = True
-                cls.file_train_model = doc.to_dict()['file_name']
-                cls.fb_updateTrainControl(2)
+                cls.info_train_file = doc.to_dict()['file_name']
+                # File Download
+                if not cls.fileDownload_dataset(cls.info_train_file):
+                    print('Train file is not exist..!!, Check db..!!')
+                    cls.fb_updateTrainControl(0)
+                else:
+                    cls.flag_train_model = True
+                    cls.fb_updateTrainControl(2)
+
             elif state_train_model == 10:  # delete
                 cls.del_dataset_by_vid(doc.to_dict()['del_vid'])
-                cls.file_train_model = "del"  #
+                cls.info_train_file = "del"  #
                 cls.flag_train_model = True
                 cls.fb_updateTrainControl(2)
+
             elif state_train_model == 3:  # Update Complete
                 cls.fb_updateTrainControl(0)
         else:
@@ -265,21 +273,45 @@ class Camera(object):
             return False
 
     @classmethod
-    def fileDownload_dataset(cls):
+    def fileDownload_dataset(cls, file):
         bucket = storage.bucket()  # 기본 버킷 사용
-        blob = bucket.blob('user_dataset/')
+        blob = bucket.blob('user_dataset/' + file)
         # new token and metadata 설정
         new_token = uuid4()
         metadata = {"firebaseStorageDownloadTokens": new_token}  # access token이 필요하다.
         blob.metadata = metadata
 
+        # upload file
         try:
-            blob.download_to_filename(filename='./audio/')
+            blob.download_to_filename(filename='./user_dataset/' + file)
+            print(f'fileDownload_dataset!! - {file}')
             print(blob.public_url)
             return True
         except Exception as e:
             print('download fail..!!: %r', e)
+            os.remove('./user_dataset/' + file)
             return False
+
+    @classmethod
+    def fileUpload_thumbnail(cls, vid, name):
+        file = str(vid) + '.' + name + '.1.jpg'
+        if not os.path.exists('dataset/' + file):
+            print(f'fileUpload_thumbnail: There is no file..{file}')
+            return
+
+        print('fileUpload_Thumbnail!!')
+        file = str(vid) + '.' + name + '.jpg'
+        bucket = storage.bucket()  # 기본 버킷 사용
+        blob = bucket.blob('user_images/' + file)
+        # new token and metadata 설정
+        new_token = uuid4()
+        metadata = {"firebaseStorageDownloadTokens": new_token}  # access token이 필요하다.
+        blob.metadata = metadata
+
+        # upload file
+        file = str(vid) + '.' + name + '.1.jpg'
+        blob.upload_from_filename(filename='./dataset/' + file, content_type='image/jpeg')
+        print(blob.public_url)
 
     @classmethod
     def fileUpload_image(cls, file):
@@ -393,16 +425,22 @@ class Camera(object):
                 continue
 
             # Check if confidence is less them 100 ==> "0" is perfect match
+            use_recognition = True
             if confidence < 100:
-                visitor_name = cls.visitor_names[visitor_id]
-                confidence = "  {0}%".format(round(100 - confidence))
+                if confidence < 70:
+                    visitor_name = cls.visitor_names[visitor_id]
+                    visitors[visitor_id] = visitor_name
+                    confidence = "  {0}%".format(round(100 - confidence))
+                else:
+                    use_recognition = False
             else:
                 visitor_name = "unknown"
+                visitors[0] = visitor_name
                 confidence = "  {0}%".format(round(100 - confidence))
 
-            visitors[visitor_id] = visitor_name
-            cv2.putText(img, str(visitor_name), (x + 5, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(img, str(confidence), (x + 5, y + h - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 1)
+            if use_recognition:
+                cv2.putText(img, str(visitor_name), (x + 5, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                cv2.putText(img, str(confidence), (x + 5, y + h - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 1)
 
         return img, visitors
 
@@ -485,8 +523,9 @@ class Camera(object):
 
                 # cv2.imshow('image', img)
 
-                cv2.waitKey(1) & 0xff  # Press 'ESC' for exiting video
+            cv2.waitKey(1) & 0xff  # Press 'ESC' for exiting video
 
+        cls.fileUpload_thumbnail(face_id, visitor_name)
         print("\n Exec_dataset_from_video complete..!!")
         cam.release()
 
@@ -626,6 +665,7 @@ class Camera(object):
                                 # print('skip')
                                 continue
                             else:
+                                print(f"capture - {k} : {v}")
                                 enble_capture = True
                                 new_visitor = k
                                 visitors_pre[k] = v
@@ -635,11 +675,12 @@ class Camera(object):
 
             # Training Model  -------------------------------------------------------------------------------
             if cls.flag_train_model:
-                print(cls.file_train_model)
-                if cls.file_train_model == "del":
+                print(cls.info_train_file)
+                if cls.info_train_file == "del":
                     print('Start training for delete..!!')
                 else:
-                    cls.exec_dataset_from_video(cls.file_train_model)
+                    print('Start training from video..!!')
+                    cls.exec_dataset_from_video(cls.info_train_file)
 
                 cls.exec_training(face_cascade)
                 cls.flag_train_model = False
