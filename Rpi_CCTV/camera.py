@@ -51,8 +51,8 @@ class Camera(object):
     def init_firebase(self):
         # firebase
 
-        #PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
-        #cred = credentials.Certificate("./firebase_certificate/"
+        # PROJECT_ID = "rpi-test-cfcd4"  # 자신의 project id
+        # cred = credentials.Certificate("./firebase_certificate/"
         #                               "rpi-test-cfcd4-firebase-adminsdk-pvuun-4bd8b1d100.json")
         PROJECT_ID = "mose-cctv"  # 자신의 project id
         cred = credentials.Certificate("./firebase_certificate/mose-cctv-firebase-adminsdk-90ev1-1933d48ad7.json")
@@ -351,12 +351,14 @@ class Camera(object):
         fps = 12.0  # 카메라에 따라 값이 정상적, 비정상적
 
         # fourcc 값 받아오기, *는 문자를 풀어쓰는 방식, *'DIVX' == 'D', 'I', 'V', 'X'
-        fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+        # fourcc = cv2.VideoWriter_fourcc(*'DIVX')
+        fourcc = cv2.VideoWriter_fourcc(*'MP4V')
 
         # 웹캠으로 찰영한 영상을 저장하기
         # cv2.VideoWriter 객체 생성, 기존에 받아온 속성값 입력
         basename = "mose"
-        suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + '.avi'
+        # suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + '.avi'
+        suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + '.mp4'
         filename = "_".join([basename, suffix])
         out = cv2.VideoWriter(r'./recordVideos/' + filename, fourcc, fps, (w, h))
 
@@ -391,12 +393,12 @@ class Camera(object):
     def create_capture_image(cls, cap, vid):
         print('execute_capture!!')
         visitor = cls.visitor_names[vid]
-        cls.que_log(3, f'Face Recognition {visitor} detect..!!', vid, visitor)
         # 사진찍기
         # 중복없는 파일명 만들기
         basename = "visitor"
         suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + '.jpg'
         filename = "_".join([basename, suffix])
+        cls.que_log(3, f'Face Recognition {visitor} detect..!!', vid, filename)
 
         cv2.imwrite('./captureImages/' + filename, cap, params=[cv2.IMWRITE_JPEG_QUALITY, 100])
 
@@ -426,6 +428,7 @@ class Camera(object):
 
             # Check if confidence is less them 100 ==> "0" is perfect match
             use_recognition = True
+            visitor_name = ""
             if confidence < 100:
                 if confidence < 70:
                     visitor_name = cls.visitor_names[visitor_id]
